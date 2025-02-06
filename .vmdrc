@@ -1,0 +1,1169 @@
+# STAMP alignment notes:
+#   VMD reads 1st letter of psf segid as chain (PROT/POT are both P)
+# ╭──────SeqData preferentially uses chain over segID
+# │         Modified SeqData to preserve segid, what will this break?
+# │  ╭──Seqdata 3-1 letter dictionary includes ions (POT/LYS both K)
+# │  │  
+# │  │  edit /usr/local/lib/vmd/plugins/noarch/tcl/seqdata1.1/seqdata_vmd.tcl
+# │  ╰─────▶change `set solvent` lines: `water or lipid` to `water or lipid or ions`
+# ╰────────▶comment out `if {$chain != "X"} {` block
+#
+# Molefacture incorrectly calculates tetrahedral H coord for a single H
+#   should be:
+#   set hcoor [vecinvert [vecnorm $hvec]]
+# 
+# TCL WILL ERROR ON UNMATCHED { IN COMMENTS THAT ARE IN FUNCTIONS
+#   Only on { brackets, and only in functions, also in text blocks?
+#   this is important for linguistic flexibility...
+#   }} just incase
+# COMMENT ONLY WORKS IF FIRST WORD OF LINE, OTHERWISE CAN BE PASSED AS ARGS
+
+proc custom_setup {} {
+    #custom stuff to do after idle, at top for convenience
+    kinase_reps SRC
+    toggle_H "none"
+    color_all beta
+    color_carbon_by_mol
+    populate_rmsdtt_seltext SRC
+    menu rmsdtt move 0 388
+    if {[molinfo list] ne ""} {mol top 0}
+    nice_align
+    top_most_frames
+}
+
+display update off
+# display resize triggers after idle queue prematurely
+display resize 1450 1018
+display reposition 470 1079
+display projection orthographic
+display rendermode GLSL
+display nearclip set 0
+display depthcue off
+menu main on
+menu main move 0 32
+after idle {
+    # does not work if any `display resize` after this block...
+    menu tkcon on
+    menu tkcon move 0 388
+}
+color Display Background black
+color Type C yellow
+color Name C silver
+
+mol default color Name
+mol default material AOChalky
+mol default style Lines
+mol default selection {all}
+
+# Good defaults for rendering through gui
+render options POV3 {povray +W%w +H%h -I%s -O%s.png +D +X +A +FN +UA; display %s.png}
+render options Tachyon {"/usr/local/lib/vmd/tachyon_LINUXAMD64" -aasamples 12 -trans_max_surfaces 1 %s -format TARGA -o %s.tga; convert %s.tga %s.png; display %s.png}
+
+proc default_rep {molid} {
+# for freshly initialized mols
+    mol delrep 0 $molid
+    if {[[atomselect $molid "protein"] num] > 0} {
+        mol selection "all"
+        mol representation "NewCartoon"
+        mol color "Name"
+        mol material "AOChalky"
+        mol addrep $molid
+    }
+    if {[[atomselect $molid "all"] num] < 500} {
+        mol selection "all"
+        mol representation "Licorice"
+        mol color "Type"
+        mol material "Glossy"
+        mol addrep $molid
+    }
+}
+
+proc clonereps {{source_molid top} {target_molids ""}} {
+    # todo
+    # should hook into plugin instead of recoding
+    #for {set i 0} {$i < [molinfo $molid get numreps]} {incr i} {
+    #    mol modcolor $i $molid $method
+    #}     
+}
+
+proc trace_log_for_colorscale_range {varname args} {
+    # trace function to set colorscale range for new or modded reps of color style $_modcat
+    # intended to be initialized by color_carbon_by_mol
+    # Initializes full range colorscale for new or existing reps with coloring method $_modcat
+    # when tracing vmd_logfile $varname is 'vmd_logfile', args is `{} w`
+    global _modcat
+    global vmd_logfile
+    set lastlog $vmd_logfile
+    if {[regexp -nocase [format "^mol modcolor (\\d+) (\\d+) %s$" $_modcat] $lastlog match r molid]} {
+        mol scaleminmax $molid $r 0 1023
+    }
+    if {[regexp {^mol addrep (\d+)$} $lastlog match molid]} {
+        set r [expr [molinfo $molid get numreps]-1]
+        set prop "{color $r}"
+        if {[string equal -nocase [molinfo $molid get $prop] $_modcat]} {
+            mol scaleminmax $molid $r 0 1023
+        }
+    }
+}
+
+proc color_carbon_by_mol {{modcat "beta"} {colorlist ""}} {
+    # Set up Coloring Method $modcat to color C by mol and preserve other elements
+    # Caution:
+    #   Overwrites property $modcat
+    #   VMD can only have one colorscale at a time
+    # modcat values assigned integers avoids float stuff and makes vis in colors->colorscale gui
+    # assumes types have element as first letter (e.g. not 1HB)
+    #   uses element as backup but will break at some point
+    # `atomselect set` uses different naming than reps, lowercase beta works for both
+    #   might need a dict?
+    global _modcat
+    global vmd_logfile
+    set _modcat $modcat
+    if {$colorlist eq ""} {
+        set colorlist {6 10 4 7 3 11 12 9 13 15 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32}
+    }
+    display update off
+    set color_start [colorinfo num]
+    set existingtypes [colorinfo category Type]
+    set num_types [llength $existingtypes]
+    set num_mols [molinfo num]
+    set num_bands [expr $num_types + $num_mols]
+    set band_width [expr 1024/($num_bands-1)]
+    for {set b 0} {$b < $num_bands} {incr b} {
+        if {$b < $num_types} {
+            set thistype [lindex $existingtypes $b]
+            set thiscolor [color Type $thistype]
+            set thisrgb [colorinfo rgb $thiscolor]
+        } else {
+            set thiscolor [lindex $colorlist [expr ($b-$num_types)%[llength $colorlist]]]
+            # could mod here to allow rgbs in $colorlist
+            set thisrgb [colorinfo rgb $thiscolor]
+        }
+        set band_start [expr $b*$band_width-$band_width/2]
+        set band_end   [expr $b*$band_width+$band_width/2]
+        if {$band_start < 0} {
+            set band_start 0
+        }
+        if {$band_end > 1024} {
+            set band_end 1024
+        }
+        for {set c $band_start} {$c < $band_end} {incr c} {
+            color change rgb [expr $color_start + $c] {*}$thisrgb
+        }
+    }
+    for {set m 0} {$m < [molinfo num]} {incr m} {
+        set molid [lindex [molinfo list] $m]
+        for {set b 0} {$b < [expr $num_types+1]} {incr b} {
+            if {$b < $num_types} {
+                set thistype [lindex $existingtypes $b]
+                set atomsel [atomselect $molid "type \"$thistype.*\" or element $thistype"]
+            } else {
+                set b [expr $num_types + $m]
+                set atomsel [atomselect $molid "(name \"C.*\" and not name \"CL.*\")"]
+            }
+            $atomsel set $_modcat [expr $b*$band_width]
+            $atomsel delete
+        }
+        # scale existing representations
+        for {set r 0} {$r < [molinfo $molid get numreps]} {incr r} {
+            if {[string match -nocase [molinfo $molid get {"color $r"}] $_modcat]} {
+                mol scaleminmax $molid $r 0 1023
+            }
+        }
+    }    
+    # scale future representations
+    if {[lsearch [trace info variable vmd_logfile] "*trace_log_for_colorscale_range*"] == -1} {
+        trace variable vmd_logfile w trace_log_for_colorscale_range
+    }
+    display update on
+}
+
+proc color_all {{method "beta"}} {
+    # set ALL reps to coloring method $method
+    foreach molid [molinfo list] {
+        for {set i 0} {$i < [molinfo $molid get numreps]} {incr i} {
+            mol modcolor $i $molid $method
+            mol scaleminmax $molid $i 0 1023
+        }
+    }
+}
+
+proc custom_scale {} {
+    # construct custom color scale
+    # color scale starts after last named color
+    set color_start [colorinfo num]
+    # don't redraw stuff while colors changing
+    display update off
+    for {set i 0} {$i < 1024} {incr i} {
+        # cut at 0.8 to avoid loop
+        set fraction [expr {$i / 1023.0 * 0.8}]
+        set r [expr {0.5 * (1 + cos(2 * 3.14159 * $fraction))}]
+        set g [expr {0.5 * (1 + cos(2 * 3.14159 * ($fraction - 1/3.0)))}]
+        set b [expr {0.5 * (1 + cos(2 * 3.14159 * ($fraction - 2/3.0)))}]
+        color change rgb [expr $i + $color_start] $r $g $b
+    }  
+    display update on
+}
+
+proc cycle_mol_display {num} {
+    # displays only the next $num mols after the last displayed mol or 0
+    set cycle_start 0
+    for {set molid [expr {[llength [molinfo list]] - 1}]} {$molid >= 0} {incr molid -1} {
+        if {[molinfo $molid get drawn] == 1} {
+            if {$cycle_start == 0} {
+                set cycle_start [expr $molid+1]
+            }
+            mol off $molid
+        }
+    }
+    for {set molid $cycle_start} {$molid < [expr $cycle_start+$num]} {incr molid} {
+        mol on $molid
+    }
+}
+
+proc snapshot_display_state {} {
+    # toggle between looking at 1 structure, and many structures
+    # if >=2 mols displayed: take snapshot of displayed mols and mol off all
+    # else: restore last snapshot
+    global disp_snapshot
+
+    array set disp_state {}
+    set disp_count 0
+    foreach molid [molinfo list] {
+        set d [molinfo $molid get displayed]
+        set disp_state($molid) $d
+        if {$d} {
+            incr disp_count
+        }
+    }
+
+    if {$disp_count >= 2} {
+        array set disp_snapshot [array get disp_state]
+        mol off all
+    } else {
+        foreach molid [molinfo list] {
+            molinfo $molid set displayed $disp_snapshot($molid)
+        }
+    }
+}
+
+proc kinase_reps {{forceprot ""} {mol_list ""}} {
+    # Add hardcoded reps to all mols based on kinase in mol name 
+    # name autodetected by: (name.split("_")[0])
+    # OR overrided with arg1 ($forceprot) and applied only to molids in arg2 ($mol_list)
+    # also sets up $alignsel as common alignment with `flag0 1`
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    foreach molid $mol_list {
+        set molname [exec basename [molinfo $molid get name]]
+        if {$forceprot eq ""} {
+            set prot [string range $molname 0 [expr {[string first "_" $molname] - 1}]]
+        } else {
+            set prot $forceprot
+        }
+        mol material AOChalky
+        switch -glob $prot {
+            "ABL*" {
+                mol representation Licorice
+                mol color Type
+                #Tyr stuff
+                # Tyr HRD-Arg DFG..Arg aCbotGlu (no-equiv, maybe bb?)
+                mol selection "(sidechain or name CA) and resid 393 362 386 292"
+                mol addrep $molid
+                #DFG stuff
+                # Lys Glu D F
+                mol selection "(sidechain or name CA) and resid 271 286 381 382"
+                mol addrep $molid
+                
+                mol color Name
+                #Spine stuff
+                # aC b4 Gatekeeper HRD-His
+                mol selection "(sidechain or name CA) and resid 290 301 315 361"
+                mol addrep $molid
+                #P-loop to aC mutant
+                # b1 b2 pre-aCloop 
+                mol selection "(sidechain or name CA) and resid 247 255 274"
+                mol addrep $molid
+                #random ABL mutants + equiv (mostly from kalodimos Abl NMR paper)
+                mol selection "(sidechain or name CA) and resid 250 253 359 389 396"
+                mol addrep $molid
+                #hinge
+                mol selection "(backbone or name HN) and resid 316 317 318"
+                mol addrep $molid
+                
+                set alignsel [atomselect $molid "backbone and resid 314 to 320"]
+            }
+            "SRC*" {
+                mol representation Licorice
+                mol color Type
+                #Tyr stuff
+                # Tyr HRD-Arg DFG..Arg aCbotGlu (no-equiv, maybe bb?)
+                mol selection "(sidechain or name CA) and resid 416 409 385"
+                mol addrep $molid
+                #DFG stuff
+                # Lys Glu D F
+                mol selection "(sidechain or name CA) and resid 295 310 404 405"
+                mol addrep $molid
+                
+                mol color Name
+                #Spine stuff
+                # aC b4 Gatekeeper HRD-His
+                mol selection "(sidechain or name CA) and resid 314 325 338 384"
+                mol addrep $molid
+                #P-loop to aC mutant
+                # b1 b2 pre-aCloop 
+                mol selection "(sidechain or name CA) and resid 272 280 298"
+                mol addrep $molid
+                #random ABL mutants + equiv (mostly from kalodimos Abl NMR paper)
+                mol selection "(sidechain or name CA) and resid 275 278 382 412"
+                mol addrep $molid
+                #hinge
+                mol selection "(backbone or name HN) and resid 339 340 341"
+                mol addrep $molid
+                
+                #NMR specific
+                mol selection "(sidechain or name CA) and resid 311 281 383 260"
+                mol addrep $molid
+                
+                set alignsel [atomselect $molid "backbone and resid 337 to 343"]
+            }
+            "EGFR*" {
+                mol representation Licorice
+                mol color Type
+                #Tyr stuff
+                # Tyr HRD-Arg DFG..Arg aCbotGlu (no-equiv, maybe bb?)
+                mol selection "(sidechain or name CA) and resid 869 836 858"
+                mol addrep $molid
+                #DFG stuff
+                # Lys Glu D F
+                mol selection "(sidechain or name CA) and resid 745 762 855 856"
+                mol addrep $molid
+                
+                mol color Name
+                #Spine stuff
+                # aC b4 Gatekeeper HRD-His
+                mol selection "(sidechain or name CA) and resid 766 777 790 835" 
+                mol addrep $molid
+                #P-loop to aC mutant
+                # b1 b2 pre-aCloop 
+                mol selection "(sidechain or name CA) and resid 717 725 748"
+                mol addrep $molid
+                #random ABL mutants + equiv (mostly from kalodimos Abl NMR paper)
+                mol selection "(sidechain or name CA) and resid 720 723 833 865"
+                mol addrep $molid
+                #hinge
+                mol selection "(backbone or name HN) and resid 791 792 793"
+                mol addrep $molid
+                
+                set alignsel [atomselect $molid "backbone and resid 789 to 795"]
+            }
+            default {
+            }
+        }
+        if {[info exists alignsel]} {
+            $alignsel set flag0 1
+            $alignsel delete
+        }
+    }
+}
+
+proc set_hinge_flag {{forceprot ""} {mol_list ""}} {
+    # sets up alignment of kinase hinges by setting `flag0 1` for resid backbones
+    # hardcoded per kinase
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    foreach molid $mol_list {
+        set molname [exec basename [molinfo $molid get name]]
+        if {$forceprot eq ""} {
+            set prot [string range $molname 0 [expr {[string first "_" $molname] - 1}]]
+        } else {
+            set prot $forceprot
+        }
+        switch -glob $prot {
+            "ABL*" {
+                set alignsel [atomselect $molid "backbone and resid 314 to 320"]
+            }
+            "SRC*" {
+                set alignsel [atomselect $molid "backbone and resid 337 to 343"]
+            }
+            "EGFR*" {
+                set alignsel [atomselect $molid "backbone and resid 789 to 795"]
+            }
+            default {
+            }
+        }
+        if {[info exists alignsel]} {
+            $alignsel set flag0 1
+            $alignsel delete
+        }
+    }
+}
+
+proc populate_rmsdtt_seltext {prot} {
+    # prepares hard-coded presets for RMSDTT align selection
+    menu rmsdtt on
+    $::rmsdtt::w.top.left.sel delete 1.0 end
+    $::rmsdtt::w.top.left.sel insert end "protein and \n"
+    set n_lines 2
+    switch $prot {
+        "SRC" {
+            set line_list {
+                           "resid 267 to 298 324 to 339 # nlobe"
+                           "#resid 359 to 379 440 to 457 489 to 517 # clobe"
+                           "#resid 303 to 317 # aC-helix"
+                           "#flag0 1"
+                           "#resid 400 to 404 425 to 437 # bef/aft A-loop"
+                          }
+        }
+        default {
+            puts "$prot not recognised"
+            return
+        }
+    }
+    incr n_lines [llength $line_list]
+    foreach line $line_list {
+        $::rmsdtt::w.top.left.sel insert end "$line\n"
+    }
+    $::rmsdtt::w.top.left.sel configure -height $n_lines
+}
+
+proc wrap_resname {{wrap_resname} {mol_list ""}} {
+    # wraps arg1 (e.g. ligand resname) in each arg2 (list of molids) into the same periodic image as the 
+    # first atom of the closest residue to the center of the protein fragment
+    # intended to remove ligand 'jumping' artifacts
+    # depends on protein remaining whole, but avoids wrapping whole system here because tcl is soooo slow
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    foreach molid $mol_list {
+        pbc wrap -molid $molid -compound fragment -sel "same fragment as protein"
+        set prot_sel [atomselect $molid "same fragment as protein"]
+        set prot_com [measure center $prot_sel]
+        set prot_sel_residue [lsort -unique [$prot_sel get residue]]
+        set prot_sel_rescom [measure centerperresidue $prot_sel] #new in vmd 1.94
+        
+        min_rescom_dist = 9999
+        for {set i 0} {$i < [llength $prot_sel_residue]} {incr i} {
+            set rescom [vecdist $prot_center [lindex $i prot_sel_rescenter]]
+            if {$rescom < $min_rescom_dist} {
+                set min_rescom_dist $rescom
+                set min_rescom_residue [lindex $prot_sel_residue $i]
+            }
+        }
+        set center_atom [lindex [[atomselect $molid "residue $min_rescom_residue"] get index] 0]
+        pbc wrap -molid $molid -all -sel "resname $wrap_resname" -compound fragment -center bb -centersel "index $center_atom"
+    }
+}
+
+proc disp_uncommon {{uncommon_resnames {}}} {
+    # create a representation for "ligands"
+    #   also includes other "uncommon" resnames in the structure
+    #       e.g. custom amino acids, co-crystallized junk
+    # add list of resnames to be displayed with arg1
+    #  
+    # hardcoded list of amino acids to avoid issues with confused `protein` identifier
+    #   due to e.g. covalent ligands, bond prediction
+    #
+    # Issues:
+    # potentially interesting ions excluded for convenience with MD trajectories
+    # ???could automate water detection
+    set common_resnames {"ALA" "ARG" "ASN" "ASP" "CYS" "GLN" "GLU" "GLY" "HIS" "HID" "HSD" "HIE" "HSE" "HIP" "HSP" "ILE" "LEU" "LYS" "MET" "PHE" "PRO" "SER" "THR" "TRP" "TYR" "VAL" "TIP3" "HOH" "WAT" "SPC" "SOL" "CLA" "CL" "POT" "NA" "SOD"}
+    foreach molid [molinfo list] {
+        set all_resnames [lsort -unique [[atomselect $molid "all"] get resname]]
+        set molid_uncommon_resnames $uncommon_resnames
+        foreach resname $all_resnames {
+            if {($resname ni $common_resnames)} {
+                lappend molid_uncommon_resnames $resname
+            }
+        }        
+        if {[llength $molid_uncommon_resnames] > 0} {
+            mol representation Licorice
+            mol material Glossy
+        	mol color Type
+        	mol selection "resname $molid_uncommon_resnames"
+            mol addrep $molid
+        }
+    }
+}
+
+
+proc uniform_cols {} {
+    # sets coloring method for all reps in a molid based on first rep color method
+    foreach molid [molinfo list] {
+        # color of top (first?) rep
+        set molcolor [molinfo $molid get {"color top"}]    
+        set numreps [molinfo $molid get numreps]
+        for {set rep 1} {$rep < $numreps} {incr rep} {
+            # need {*} for list expansion, because vmd scripts treat ColorID differently
+            mol modcolor $rep $molid {*}$molcolor
+        }
+    }
+}
+
+proc toggle_H {{mode ""}} {
+    # cycles through hydrogen representations: all, polar, none
+    # ()'s current selection
+    #   won't remove brackets if manual edit causes them to not be first/last
+    global H_mode
+
+    if {![info exists H_mode]} {
+        set H_mode "all"
+    }
+
+    if {$mode eq ""} {
+        switch $H_mode {
+            "all" { set H_mode "polar" }
+            "polar" { set H_mode "none" }
+            "none" { set H_mode "all" }
+        }
+    } else {
+        set H_mode $mode
+    }
+
+    foreach molid [molinfo list] {
+        set numreps [molinfo $molid get numreps]
+        for {set rep 0} {$rep < $numreps} {incr rep} {
+            set current_sel [molinfo $molid get [subst {{selection $rep}}]]
+            set current_sel [string trim $current_sel "{}"]
+            set clean_sel [string map {" and not (hydrogen and within 1.5 of name \"C.*\")" ""} $current_sel]
+            set clean_sel [string map {" and not hydrogen" ""} $clean_sel]
+            if {[string first "(" $clean_sel] == 0 && [string last ")" $clean_sel] == [expr {[string length $clean_sel] - 1}]} {
+                set clean_sel [string range $clean_sel 1 end-1]
+            }
+
+            switch $H_mode {
+                "all" {
+                    set new_sel "$clean_sel"
+                }
+                "polar" {
+                    set new_sel "($clean_sel) and not (hydrogen and within 1.5 of name \"C.*\")"
+                }
+                "none" {
+                    set new_sel "($clean_sel) and not hydrogen"
+                }
+            }
+            mol modselect $rep $molid $new_sel
+        }
+    }
+}
+
+proc smooth_all {{smooth_window 2}} {
+    # toggle smoothing over arg1 frames
+    # if first rep of first mol is already smoothed, toggle all smoothing off
+    if {[mol smoothrep [lindex [molinfo list] 0] 0] > 0} {
+        set smooth_window 0
+    }
+
+    foreach molid [molinfo list] {
+        set numreps [molinfo $molid get numreps]
+        for {set rep 0} {$rep < $numreps} {incr rep} {       
+            mol smoothrep $molid $rep $smooth_window
+        }
+    }
+}
+
+proc update_secondary_structure_assignment { args } {
+    #update secondary structure for all molids and current frame
+    foreach molid [molinfo list] {
+        mol ssrecalc $molid
+    }
+}
+
+proc align {{select_str "name CA"}} {
+    # aligns all mol to top/frame0 by atoms match in $select_str
+    set ref [atomselect top $select_str frame 0]
+    foreach molid [molinfo list] {
+        set nf [molinfo $molid get numframes]
+        set all [atomselect $molid "all"]
+        set sel [atomselect $molid $select_str]
+        for { set i 0 } { $i < $nf } { incr i } {
+            $all frame $i
+            $sel frame $i
+            $all move [measure fit $sel $ref]
+        }
+        display resetview
+    }
+}
+
+proc nice_align {{select_str "name CA"} {frame 0}} {
+    # attempts STAMP alignment for $frame of all mol
+    # follows with alignment of each trajectory to $frame
+    # STAMP hardcoded to align at `frame now`
+    animate goto $frame
+    if {[molinfo num] > 1} {
+        if { [catch {stamp_align} error] } {
+            puts "STAMP error: $error, continuing..."
+        }
+    }
+    align_self $select_str $frame
+}
+
+proc align_self {{select_str "name CA"} {frame 0}} {
+    # alignment of each trajectory to its own $frame
+    foreach molid [molinfo list] {
+        set ref [atomselect $molid $select_str frame $frame]
+        set all [atomselect $molid "all"]
+        set tgt [atomselect $molid $select_str]
+        for { set i 0 } { $i < [molinfo $molid get numframes] } { incr i } {
+            $all frame $i
+            $tgt frame $i
+            $all move [measure fit $tgt $ref]
+        }
+    }
+    display resetview
+}
+
+proc stamp_align {} {
+    # stamp structural alignment of all $molids as per multiseq
+    # very fragile due to assumptions in vmd modules
+    # breaks multiseq for rest of session, does not work after running multiseq
+    # TO DO:
+    #   initiate protein sequences cleanly
+    #   clean protein sequences
+
+    puts "updateing sequences"
+    ::SeqData::VMD::updateVMDSequences
+    # reading water as part of sequence takes longer than everything else combined
+    # edit seqdata_vmd.tcl, change set solvent to (water or lipid or ions)
+    puts "."
+    set sequenceIDs {}
+    # operates only on first chain, assumes protein and contiguous
+    foreach molid [molinfo list] {
+        lappend sequenceIDs [lindex [lsort -integer [::SeqData::VMD::getSequenceIDsForMolecule $molid]] 0]
+    }
+    
+    # meant to extract protein from mixed chains, mostly works for PDB but for MD trajs it can extracts ligand
+    # set extractedRegions [::SeqData::VMD::extractFirstRegionFromStructures $sequenceIDs "Y"]
+    # set regionSequenceIDs [lindex $extractedRegions 1]
+    set regionSequenceIDs $sequenceIDs
+    
+    # alignment
+    # STAMP plugin is hardcoded to pull all structures from frame now
+    puts "aligning structures"
+    ::STAMP::alignStructures $regionSequenceIDs 1 5 6 0 2
+    # code snippet that pulls/applies stamp transforms
+    puts "applying transformations"
+    ::MultiSeq::applyStampTransformations $sequenceIDs
+}
+
+proc stamp_align_pairwise {} {
+    # stamp structural alignment for each molid to molid 0, one at a time 
+    set filename "tmp.txt"
+    set file [open $filename "w"]
+    puts "updateing sequences"
+    ::SeqData::VMD::updateVMDSequences
+    # reading water as part of sequence takes longer than everything else combined
+    # edit seqdata_vmd.tcl, change set solvent to (water or lipid or ions)
+    puts "."
+    set sequenceIDs {}
+    # operates only on first chain, assumes protein and contiguous
+    foreach molid [molinfo list] {
+        set sequenceIDs []
+        lappend sequenceIDs [lindex [lsort -integer [::SeqData::VMD::getSequenceIDsForMolecule 0]] 0]
+        lappend sequenceIDs [lindex [lsort -integer [::SeqData::VMD::getSequenceIDsForMolecule $molid]] 0]
+        set regionSequenceIDs $sequenceIDs
+        puts $file "aligning $molid"
+        flush $file
+        ::STAMP::alignStructures $regionSequenceIDs 1 5 6 0 2
+        ::MultiSeq::applyStampTransformations $sequenceIDs
+    }
+    close $file
+}
+
+proc stamp_align_traj {} {
+    # stamp align entire trajectory
+    #time taken is n^2, 50 frames = 10 sec
+    variable viewtrans
+    variable viewrot
+    global env
+    set tempDir $env(TMPDIR)
+    set filePrefix "stamp"
+    # Delete any old files.
+    foreach file [glob -nocomplain $tempDir/$filePrefix.*] {
+        file delete -force $file
+    }
+
+    foreach molid [molinfo list] {
+        ::SeqData::VMD::updateVMDSequences
+
+        set sequenceIDs [lindex [::SeqData::VMD::getSequenceIDsForMolecule $molid] 0]
+#        set extractedRegions [::SeqData::VMD::extractFirstRegionFromStructures $sequenceIDs "Y"]
+#        set regionSequenceIDs [lindex $extractedRegions 1]
+
+        # Assume protein for alignment is 0-indexed sequence (e.g. at start of pdb file), getSequenceIDsForMolecule keeps listing lig index first for MD data
+        # also assumes 1 contiguous chain
+        set regionSequenceIDs 0
+
+        # Set up the start domain file.
+        ::SeqData::VMD::writeStructure $regionSequenceIDs "$tempDir/$filePrefix.0.pdb" "name CA" "all" 0 0
+        set start_domain [open "$tempDir/$filePrefix.start.domain" w]
+        puts $start_domain "$filePrefix.0.pdb 0 { ALL }"
+        close $start_domain
+
+        # Set up the remainder domain file.
+        set db_domain [open "$tempDir/$filePrefix.db.domain" w]
+        set nf [molinfo $molid get numframes]
+        for {set i 1} {$i < $nf} {incr i} {
+            ::SeqData::VMD::writeStructure $regionSequenceIDs "$tempDir/$filePrefix.$i.pdb" "name CA" "all" 0 $i
+            puts $db_domain "$filePrefix.$i.pdb $i { ALL }"
+        }
+        close $db_domain
+        
+        mini_stamp_call $nf
+        
+        for {set i 1} {$i < $nf} {incr i} {
+            set transformationMatrix {}
+    
+            for {set j 0} {$j < 3} {incr j} {
+                lappend transformationMatrix [concat [lindex $viewtrans($i) $j] [lindex $viewrot($i) $j]]
+            }
+            lappend transformationMatrix {0.000000 0.000000 0.000000 1.0000000}
+            set atomsel [atomselect $molid "all" frame $i]
+            $atomsel move $transformationMatrix
+            $atomsel delete
+        }
+    }
+}
+
+proc mini_stamp_call {nseq {filePrefix "stamp"} {scan 1} {scanslide 5} {scanscore 6} {slowscan 0} {npass 2}} {
+    # trimmed version of stamp call function, does not update sequence alignment, aligns files in $tempDir/$filePrefix.db.domain to $tempDir/$filePrefix.start.domain
+    # skips all checks of input data, only works on protein
+    global env
+    set tempDir $env(TMPDIR)
+    variable viewtrans
+    variable viewrot
+    set atomTypeParam 0
+ 
+    # Run the rough fit of stamp.
+    set rough_out [::STAMP::run "$tempDir" -f \"$filePrefix.start.domain\" -scan $scan -scanslide $scanslide -scanscore $scanscore -slowscan $slowscan -n $npass -d \"$filePrefix.db.domain\" -ATOMTYPE $atomTypeParam -prefix $filePrefix]
+    
+    # Run the final fit of stamp.
+    set final_out [::STAMP::run "$tempDir" -f \"$filePrefix.scan\" -ATOMTYPE $atomTypeParam -prefix $filePrefix]
+
+    # Get the name of the file with the output
+    set outfile "$filePrefix.[expr $nseq-1]"
+
+    # Clear view transform matrices.
+    if {[info exists viewrot]} {
+        unset viewrot
+    }
+    if {[info exists viewtrans]} {
+        unset viewtrans
+    }
+
+    # Parse the output.
+    set out_fh [open $tempDir/$outfile r]
+    if { [info exists mlist] } { unset mlist }
+    set num_out 0
+    while {![eof $out_fh]} {
+        if {[gets $out_fh inline] > 0} {
+            if {[regexp {^.*\{[ ]+ALL.*$} $inline]} {
+
+                # A filename line.
+                set mnum [lrange [split $inline "."] 1 1]
+                if { $num_out < $mnum } { set num_out $mnum }
+                lappend mlist $mnum
+                set dline 0
+
+            } elseif {[regexp {^.*[0-9]+\.[0-9]+[ ]+.[0-9]+\.[0-9]+[ ]+.[0-9]+\.[0-9]+[ ]+.[0-9]+\.[0-9]+[ ]+.*$} $inline]} {
+
+                # A matrix line.
+                set tmpar ""
+                set num_read 0
+                foreach num [split $inline] {
+                    if {[regexp {^.*[0-9].*$} $num]} {
+                        if {$num_read < 3} {
+                            incr num_read
+                            lappend tmpar $num
+                        } else {
+                            lappend viewrot($mnum) $num
+                        }
+                    }
+                }
+                lappend viewtrans($mnum) $tmpar
+                incr dline
+            }
+        }
+    }
+    close $out_fh
+}
+
+proc label_charges {seltext} {
+    # label each atom with partial charge
+    set label_sel [atomselect top $seltext]
+    foreach i [$label_sel get index] {
+        set atom_sel [atomselect top "index $i"]
+        draw text [join [$atom_sel get {x y z}]] "[format "%0.3f" [$atom_sel get charge]]" size 2
+        $atom_sel delete
+    }
+    $label_sel delete
+}
+
+proc ssrecalc_molid { molid args } {
+    # trace function to ssrecalc every frame
+    # trace passes 3 additional arguments and does nothing if they're not accepted?
+    # e.g. `trace add variable vmd_frame(4) write` passes args: vmd_frame 4 write
+    mol ssrecalc $molid
+}
+
+proc interactive {{on 1} {mol_list ""}} {
+    # toggle ($arg1) updating secondary structure every frame for molids in $arg2
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    #upvar 1 vmd_frame vmd_frame # alias local vmd_frame to 1-level-higher (global) vmd_frame, doesn't work with arrays in tcl versions with prime numbers
+    global vmd_frame
+    foreach molid $mol_list {
+        set tracecmd "ssrecalc_molid $molid"
+        set tracevar "vmd_frame($molid)"
+        # check molid is not already being traced, {}'s only occur if space in $tracecmd
+        if {$on && [lsearch [trace info variable $tracevar] "write {$tracecmd}"] == -1} { 
+            trace add variable $tracevar write $tracecmd
+        } elseif {!$on} { 
+            trace remove variable $tracevar write $tracecmd 
+        }
+    }
+}
+
+proc interactive_top {} {
+    global vmd_frame
+    set molid [molinfo top]
+    set tracecmd "ssrecalc_molid $molid"
+    set tracevar "vmd_frame($molid)"
+    if {[lsearch [trace info variable $tracevar] "write {$tracecmd}"] == -1} {
+        trace add variable $tracevar write $tracecmd
+    } else {
+        trace remove variable $tracevar write $tracecmd
+    }
+}
+
+proc picture_mode {} {
+    if {[color Display Background] == "black"} {
+        color Display Background white
+        # unsaturated color defs for print and AO
+        color change rgb  0 0.1 0.2 0.7 ;# blue
+        color change rgb  1 0.7 0.2 0.1 ;# red
+        color change rgb  3 0.7 0.4 0.0 ;# orange
+        color change rgb  4 0.8 0.7 0.1 ;# yellow
+        color change rgb  7 0.1 0.7 0.2 ;# green
+        color change rgb 10 0.1 0.7 0.8 ;# cyan
+        color change rgb 11 0.6 0.1 0.6 ;# purple
+    } else {
+        color Display Background black
+        color change rgb  0
+        color change rgb  1
+        color change rgb  3
+        color change rgb  4
+        color change rgb  7
+        color change rgb 10
+        color change rgb 11
+    }
+}
+
+proc top_most_frames {} {
+    # sets most frames to top
+    # only works inside function
+    set molid_most_frames [lindex [lsort -integer -index 1 -decreasing [lmap i [molinfo list] {list $i [molinfo $i get numframes]}]] 0 0]
+    if {$molid_most_frames ne ""} {mol top $molid_most_frames}
+}
+
+##############################################
+##### Scripts for moviemaking (not mine) #####
+##############################################
+
+proc interactive_input {{default 0} {title "input"}} { 
+    # prompt for standard input 
+    global result
+    set result $default
+    toplevel .t
+    pack [entry .t.e -textvariable result]
+    pack [button .t.b -text "OK" -command {destroy .t}]
+    bind .t <Return> {.t.b invoke}
+    focus .t.e
+    wm title .t $title
+    tkwait window .t
+    return $result
+}
+
+proc myrender {{show 0} {ask 1} {suffix {}}} {
+    # example rendering script
+    color Display Background white
+    axes location off
+
+    #load_view_from_file; sleep 2
+
+    display rendermode GLSL
+    #display ambientocclusion on
+    #display shadows on
+    display antialias on
+    display update
+
+    set name [lindex [lindex [molinfo 0 get filename] 0] end]
+    set name [file rootname $name]
+    set tga [join [list $name "$suffix.tga"] ""]
+    set png [join [list $name "$suffix.png"] ""]
+    if {$ask} {
+        set png [interactive_input $png "PNG file name"]
+    }
+    puts $tga
+    render TachyonInternal $tga
+
+    #exec -- convert $tga -crop 500x500+100+150 -fuzz 5% -transparent white $png
+    exec -- convert $tga -trim $png
+    #exec -- convert $tga -trim -transparent white $png
+    #exec -- convert $tga -trim -fuzz 1% -transparent white $png
+    if {$show} { exec -- display $png }
+    #display resize $x $y
+    #scale by 0.5
+}
+
+proc label_atoms { molid seltext } { 
+    # assign vmd atom labels to selection
+    set sel [atomselect $molid $seltext] 
+    set atomlist [$sel list] 
+    foreach {atom} $atomlist {
+        set atomlabel [format "%d/%d" $molid $atom] 
+        label add Atoms $atomlabel 
+    } 
+    $sel delete 
+} 
+
+proc save_view_to_file {{fname "view.dat"}} {
+    # save camera to file
+    set view [list [molinfo 0 get center_matrix] \
+        [molinfo 0 get rotate_matrix] \
+        [molinfo 0 get scale_matrix] \
+        [molinfo 0 get global_matrix] \
+        [display get size] \
+        [display get height]]
+    set f [open $fname "w"]
+    puts $f $view
+    close $f
+}
+
+proc load_view_from_file {{fname "view.dat"}} {
+    # load camera from file
+    set f [open $fname r]
+    set d [read $f]
+    close $f
+    foreach i [molinfo list] {
+        molinfo $i set center_matrix [lindex $d 0]
+        molinfo $i set rotate_matrix [lindex $d 1]
+        molinfo $i set scale_matrix  [lindex $d 2]
+        molinfo $i set global_matrix [lindex $d 3]
+    }
+    set size [lindex $d 4]
+    set x [lindex $size 0]
+    set y [lindex $size 1]
+    display resize $x $y
+    display height [lindex $d 5]
+}
+
+#proc make_movie {{freq 1}} {
+#    set name [lindex [lindex [molinfo 0 get filename] 0] 1]
+#    set name [file rootname $name]
+#    set name [file tail $name]
+#
+#    #set MDM2_selection [atomselect top "chain A"]
+#    #global MDM2_crystal_ss
+#
+#    # adapted from http://www.ks.uiuc.edu/Research/vmd/script_library/scripts/trajectory_movie_short/
+#    # Andrew Dalke (dalke@ks.uiuc.edu)
+#    # get the number of frames in the movie
+#    set num [molinfo top get numframes]
+#    # USER END
+#    set num [interactive_input $num]
+#    set start [interactive_input 0]
+#    # loop through the frames
+#    for {set i $start} {$i < $num} {incr i $freq} {
+#    # go to the given frame
+#      animate goto $i
+#      $MDM2_selection frame $i
+#      $MDM2_selection set structure $MDM2_crystal_ss
+#      display update
+#      set filename $name.[format "%05d" [expr $i/$freq]].dat
+#      render Tachyon $filename "gzip -f $filename"
+#  }
+#}
+
+proc make_movie {{freq 1} {ps_per_frame 100}} {
+    puts "freq is $freq"
+    puts "ps_per_frame is $ps_per_frame"
+    color Display Background white
+    axes location off
+
+    interactive 0
+
+    set top [molinfo top]
+    set label_mol [mol new]
+    mol top $top
+    mol rename $label_mol "label"
+    molinfo $label_mol set center_matrix [list [transidentity]]
+    molinfo $label_mol set rotate_matrix [list [transidentity]]
+    molinfo $label_mol set global_matrix [list [transidentity]]
+    molinfo $label_mol set scale_matrix [list [transidentity]]
+
+    set frames_per_us [expr 1000000. / $ps_per_frame]
+
+    set name [lindex [lindex [molinfo 0 get filename] 0] end]
+    set name [file rootname $name]
+    set name [file tail $name]
+    set num [molinfo top get numframes]
+    set start 1
+    file mkdir imgs_$name
+    # loop through the frames
+    for {set i $start} {$i < $num} {incr i $freq} {
+      animate goto $i
+      #draw delete all
+      #draw text {-85 22 0} 
+      graphics $label_mol delete all
+      graphics $label_mol text {0.65 0.6 1} [format {%0.3f us} [expr $i / $frames_per_us]] size 2
+      # us
+      display update
+      set filename imgs_$name/$name.[format "%05d" [expr $i/$freq]].ppm
+      puts $filename
+      render snapshot $filename
+    }
+    exec -- bash compress.sh $name
+    
+    mol delete $label_mol
+}
+
+proc addrep {selection color style {thickness 0.3}} {
+     set id [molinfo top get numreps]
+     mol addrep top
+     #puts "new id is $id"
+     mol modselect $id top $selection
+     mol modstyle $id top $style $thickness
+     if {[string is integer $color]} {
+         mol modcolor $id top ColorID $color
+     } {
+         mol modcolor $id top $color
+     }
+     return $id
+}
+
+proc printsc {text {x 0.0} {y 0.0}} {
+  array set viewpoints {}
+  foreach mol [molinfo list] {
+    # save orientation and zoom parameters for each molecule.
+    set viewpoints($mol) [molinfo $mol get {center_matrix rotate_matrix scale_matrix global_matrix}]
+  } 
+  display update off
+  display resetview
+
+  draw text [list $x $y 0] $text size 2
+
+  foreach mol [molinfo list] {
+    # restore orientation and zoom
+    molinfo $mol set {center_matrix rotate_matrix scale_matrix
+    global_matrix} $viewpoints($mol)
+  }
+  
+  display update on
+}
+
+
+proc back {} {
+	if {[color Display Background] == "white"} {
+		color Display Background black
+	} { color Display Background white
+	}	
+}
+
+proc lmap {_var list body} {
+    upvar 1 $_var var
+    set res {}
+    foreach var $list {lappend res [uplevel 1 $body]}
+    set res
+}
+
+proc highlight_beta { args } {
+  global highlight_repname
+  global highlight_extra_selection
+  puts "callback"
+  set timestep [molinfo top get frame]
+  set files [lsort [glob "*.pdb"]]
+  set current_file [lindex $files $timestep]
+  
+  set fp [open $current_file r]
+  set file_data [read $fp]
+  close $fp
+  set data [split $file_data "\n"]
+  set selection {}
+  foreach line $data {
+     # do some whacky TCL crazyness in the next line
+     set atom [string range $line 0 3]
+     if {$atom != "ATOM"} { continue }
+     set index [string range $line 6 11]
+     set beta [ string range $line 60 66]
+     if {$beta == 1.0} {
+        # puts "appending $index"
+        lappend selection $index
+     } else {
+       if {$beta != 0.0} { 
+         puts "something went wrong: $index $beta"
+         puts "$line"
+       }
+     }
+  }
+  set selection [lmap x $selection {expr $x - 1}]
+  set selection [join $selection " "]
+  puts "$highlight_extra_selection index $selection"
+  puts [mol repindex top $highlight_repname]
+  mol modselect [mol repindex top $highlight_repname] top "$highlight_extra_selection index $selection"
+}
+
+proc init_highlight {{extra_selection "(same residue as (within 4 of (resname IMA) or resname IMAT)) and"}} {
+  global highlight_repname
+  global highlight_extra_selection
+  set id [molinfo top get numreps]
+  mol addrep top
+  mol modstyle $id top Licorice
+  mol modselect $id top "none"
+  set highlight_repname [mol repname top $id]
+  upvar vmd_frame vmd_frame
+  trace variable vmd_frame(0) w highlight_beta
+  set highlight_extra_selection $extra_selection
+}
+
+##############################################
+##############################################
+##############################################
+
+proc default_rep_proxy {args} {
+    # trace function to apply default rep when new mol loaded
+    foreach {fname molid rw} $args {}
+    eval "after idle {default_rep $molid}"
+}
+trace variable vmd_initialize_structure w default_rep_proxy
+
+# automatically applies this block after initialized
+after idle {
+    foreach molid [molinfo list] {
+        default_rep $molid
+    } 
+    after idle {
+        custom_setup
+    }
+    display update on
+}
+
+user add key F8 { picture_mode }
+user add key J { save_view_to_file "view0.dat"}
+user add key K { save_view_to_file "view1.dat" }
+user add key L { save_view_to_file "view2.dat" }
+user add key M { load_view_from_file "view0.dat"}
+user add key < { load_view_from_file "view1.dat" }
+user add key > { load_view_from_file "view2.dat" }
+user add key B { pbc box -center bb -toggle -color [molinfo top] }
+user add key N { draw delete all }
+user add key H { toggle_H }
+user add key U { update_secondary_structure_assignment }
+user add key I { interactive_top }
+user add key O { disp_uncommon }
+user add key P { smooth_all }
+user add key V { nice_align }
+user add key _ { snapshot_display_state }
