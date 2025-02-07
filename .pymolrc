@@ -1,0 +1,7 @@
+set auto_zoom, 0
+set pdb_retain_ids, 1
+set retain_order, 1
+run /home/trayder/.pymol/scripts/Focus_alignment.py
+run /home/trayder/.pymol/scripts/select_by_alignment.py
+run /home/trayder/.pymol/scripts/update_select_by_alignment.py
+run /home/trayder/.pymol/scripts/dir_to_group.py
