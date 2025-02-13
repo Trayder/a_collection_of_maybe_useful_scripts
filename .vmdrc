@@ -25,7 +25,7 @@ proc custom_setup {} {
     color_all beta
     color_carbon_by_mol
     populate_rmsdtt_seltext SRC
-    menu rmsdtt move 0 388
+    menu rmsdtt move 0 600
     if {[molinfo list] ne ""} {mol top 0}
     nice_align
     top_most_frames
