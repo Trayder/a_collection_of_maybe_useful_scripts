@@ -86,6 +86,53 @@ proc clonereps {{source_molid top} {target_molids ""}} {
     #}     
 }
 
+proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"}} {
+    # identifies clashes by proximity or by comparing topology bonds to vmd autoprediction
+    #   i.e. if minimizer resolves a clash by stretching bonds
+    # will not detect proximity clashes between directly bonded atoms
+    # operates on mol `top` and frame `now`
+    # assumes minimizer can resolve water-water clashes without stretching
+    #   namd minimizer could solve worst case waters clash
+    set box [join [pbc get -now]]
+    lassign $box x y z j k l
+    set halfvec "[expr $x/2.0] [expr $y/2.0] [expr $z/2.0]"
+
+    # measure contacts does not consider pbc
+    pbc join fragment
+    pbc wrap
+    lassign [measure contacts $cutoff [atomselect top "all"]] clash_atoms1 clash_atoms2
+
+    [atomselect top "all"] moveby $halfvec
+    pbc wrap
+    lassign [measure contacts $cutoff [atomselect top "all"]] new_clash_atoms1 new_clash_atoms2
+    [atomselect top "all"] moveby [vecinvert $halfvec]
+
+    set clash_atoms1 [concat $clash_atoms1 $new_clash_atoms1]
+    set clash_atoms2 [concat $clash_atoms2 $new_clash_atoms2]
+
+    set unique_pairs [dict create]
+    for {set i 0} {$i < [llength $clash_atoms1]} {incr i} {
+        set pair [lsort -increasing [list [lindex $clash_atoms1 $i] [lindex $clash_atoms2 $i]]]
+        dict set unique_pairs $pair 1
+    }
+    set clash_pairs [dict keys $unique_pairs]
+    puts "clashing pair indices:"
+    puts $clash_pairs
+
+    set compare_sel [atomselect top $check_bonds_sel"]
+    set orig_indices [$compare_sel get index]
+    set top_numbonds [$compare_sel get numbonds]
+    mol bondsrecalc top
+    set vmd_numbonds [$compare_sel get numbonds]
+    set odd_bonds {}
+    for {set i 0} {$i < [llength $top_numbonds]} {incr i} {
+        if {[lindex $vmd_numbonds $i] != [lindex $top_numbonds $i]} {
+            set diff [expr [lindex $vmd_numbonds $i] - [lindex $top_numbonds $i]]
+            puts "index [lindex $orig_indices $i] numbonds changed by '$diff'"
+        }
+    }
+}
+
 proc trace_log_for_colorscale_range {varname args} {
     # trace function to set colorscale range for new or modded reps of color style $_modcat
     # intended to be initialized by color_carbon_by_mol
@@ -110,6 +157,7 @@ proc color_carbon_by_mol {{modcat "beta"} {colorlist ""}} {
     # Set up Coloring Method $modcat to color C by mol and preserve other elements
     # Caution:
     #   Overwrites property $modcat
+    #       WARNING: VMD will write 4 digit beta values into B columns and break PDB format
     #   VMD can only have one colorscale at a time
     # modcat values assigned integers avoids float stuff and makes vis in colors->colorscale gui
     # assumes types have element as first letter (e.g. not 1HB)
