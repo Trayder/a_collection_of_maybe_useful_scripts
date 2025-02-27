@@ -17,4 +17,8 @@ nnoremap <C-n> :next<CR>
 nnoremap <C-p> :prev<CR>
 
 " clear search highlights
-nnoremap <esc> :noh<return><esc>
+" :let @/ = ""
+nnoremap <esc><esc> :noh<return>
+
+" has a delay:
+" nnoremap <esc> :noh<enter><esc>

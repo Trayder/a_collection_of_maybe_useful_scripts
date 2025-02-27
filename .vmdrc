@@ -20,15 +20,16 @@
 
 proc custom_setup {} {
     #custom stuff to do after idle, at top for convenience
-    kinase_reps SRC
-    toggle_H "none"
-    color_all beta
-    color_carbon_by_mol
-    populate_rmsdtt_seltext SRC
-    menu rmsdtt move 0 600
-    if {[molinfo list] ne ""} {mol top 0}
-    nice_align
-    top_most_frames
+#    trace_default_rep
+#    kinase_reps SRC
+#    toggle_H "none"
+#    color_all beta
+#    color_carbon_by_mol
+#    populate_rmsdtt_seltext SRC
+#    menu rmsdtt move 0 600
+#    if {[molinfo list] ne ""} {mol top 0}
+#    nice_align
+#    top_most_frames
 }
 
 display update off
@@ -138,6 +139,7 @@ proc trace_log_for_colorscale_range {varname args} {
     # intended to be initialized by color_carbon_by_mol
     # Initializes full range colorscale for new or existing reps with coloring method $_modcat
     # when tracing vmd_logfile $varname is 'vmd_logfile', args is `{} w`
+    # setting rep to 'default' resets the scale via `modrep` and is not caught
     global _modcat
     global vmd_logfile
     set lastlog $vmd_logfile
@@ -1186,7 +1188,11 @@ proc default_rep_proxy {args} {
     foreach {fname molid rw} $args {}
     eval "after idle {default_rep $molid}"
 }
-trace variable vmd_initialize_structure w default_rep_proxy
+
+proc trace_default_rep {} {
+    # doesn't play nice with some plugins
+    trace variable vmd_initialize_structure w default_rep_proxy
+}
 
 # automatically applies this block after initialized
 after idle {
