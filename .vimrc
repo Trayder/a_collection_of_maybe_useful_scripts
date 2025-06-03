@@ -18,7 +18,8 @@ nnoremap <C-p> :prev<CR>
 
 " clear search highlights
 " :let @/ = ""
-nnoremap <esc><esc> :noh<return>
+" pastes random letters:
+" nnoremap <esc><esc> :noh<return>
 
 " has a delay:
 " nnoremap <esc> :noh<enter><esc>

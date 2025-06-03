@@ -20,10 +20,14 @@
 
 proc custom_setup {} {
     #custom stuff to do after idle, at top for convenience
-#    trace_default_rep
+    foreach molid [molinfo list] {
+        default_rep $molid
+    } 
+    trace_default_rep
 #    kinase_reps SRC
 #    toggle_H "none"
-#    color_all beta
+#    color_all chain
+#    populate_rmsdtt_seltext test
 #    color_carbon_by_mol
 #    populate_rmsdtt_seltext SRC
 #    menu rmsdtt move 0 600
@@ -77,6 +81,9 @@ proc default_rep {molid} {
         mol material "Glossy"
         mol addrep $molid
     }
+#    mol selection "resid 440 to 446"
+#    mol representation "Licorice"
+#    mol addrep $molid
 }
 
 proc clonereps {{source_molid top} {target_molids ""}} {
@@ -87,13 +94,19 @@ proc clonereps {{source_molid top} {target_molids ""}} {
     #}     
 }
 
-proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"}} {
-    # identifies clashes by proximity or by comparing topology bonds to vmd autoprediction
-    #   i.e. if minimizer resolves a clash by stretching bonds
-    # will not detect proximity clashes between directly bonded atoms
+proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"} {contacts_sel1 "all"} {contacts_sel2 "all"}} {
+    # Identifies clashes/issues before/after minimization
+    # Requires topology with bonds + coordinates with pbc cell
     # operates on mol `top` and frame `now`
-    # assumes minimizer can resolve water-water clashes without stretching
-    #   namd minimizer could solve worst case waters clash
+    # Two Methods:
+    #   1. `measure contacts` reports pairs of non-bonded atoms within $cutoff between $contacts_sel1 and $contacts_sel2
+    #       shifts system to calculate clashes to adjacent pbc cells
+    #       Note: will not detect clashes between bonded atoms
+    #   2. Compares number of bonds between topology and vmd autoprediction for atoms in $check_bonds_sel
+    #      this includes bonds to atoms outside of the selection (e.g. water)
+    #      also identifies if minimizer resolves a clash by stretching bonds, e.g. lipid tail through sidechain ring
+    #      excludes water by default as even worst case water-water clash did not result in bond-stretching
+    
     set box [join [pbc get -now]]
     lassign $box x y z j k l
     set halfvec "[expr $x/2.0] [expr $y/2.0] [expr $z/2.0]"
@@ -101,11 +114,11 @@ proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"}} {
     # measure contacts does not consider pbc
     pbc join fragment
     pbc wrap
-    lassign [measure contacts $cutoff [atomselect top "all"]] clash_atoms1 clash_atoms2
+    lassign [measure contacts $cutoff [atomselect top $contacts_sel1] [atomselect top $contacts_sel2]] clash_atoms1 clash_atoms2
 
     [atomselect top "all"] moveby $halfvec
     pbc wrap
-    lassign [measure contacts $cutoff [atomselect top "all"]] new_clash_atoms1 new_clash_atoms2
+    lassign [measure contacts $cutoff [atomselect top $contacts_sel1] [atomselect top $contacts_sel2]] new_clash_atoms1 new_clash_atoms2
     [atomselect top "all"] moveby [vecinvert $halfvec]
 
     set clash_atoms1 [concat $clash_atoms1 $new_clash_atoms1]
@@ -144,13 +157,13 @@ proc trace_log_for_colorscale_range {varname args} {
     global vmd_logfile
     set lastlog $vmd_logfile
     if {[regexp -nocase [format "^mol modcolor (\\d+) (\\d+) %s$" $_modcat] $lastlog match r molid]} {
-        mol scaleminmax $molid $r 0 1023
+        mol scaleminmax $molid $r 0 10.23
     }
     if {[regexp {^mol addrep (\d+)$} $lastlog match molid]} {
         set r [expr [molinfo $molid get numreps]-1]
         set prop "{color $r}"
         if {[string equal -nocase [molinfo $molid get $prop] $_modcat]} {
-            mol scaleminmax $molid $r 0 1023
+            mol scaleminmax $molid $r 0 10.23
         }
     }
 }
@@ -159,9 +172,8 @@ proc color_carbon_by_mol {{modcat "beta"} {colorlist ""}} {
     # Set up Coloring Method $modcat to color C by mol and preserve other elements
     # Caution:
     #   Overwrites property $modcat
-    #       WARNING: VMD will write 4 digit beta values into B columns and break PDB format
     #   VMD can only have one colorscale at a time
-    # modcat values assigned integers avoids float stuff and makes vis in colors->colorscale gui
+    # scaleminmax set to 10.23 as VMD will write 4 digit beta values into B columns and break PDB format
     # assumes types have element as first letter (e.g. not 1HB)
     #   uses element as backup but will break at some point
     # `atomselect set` uses different naming than reps, lowercase beta works for both
@@ -211,13 +223,13 @@ proc color_carbon_by_mol {{modcat "beta"} {colorlist ""}} {
                 set b [expr $num_types + $m]
                 set atomsel [atomselect $molid "(name \"C.*\" and not name \"CL.*\")"]
             }
-            $atomsel set $_modcat [expr $b*$band_width]
+            $atomsel set $_modcat [format %.2f [expr $b*$band_width*.01]]
             $atomsel delete
         }
         # scale existing representations
         for {set r 0} {$r < [molinfo $molid get numreps]} {incr r} {
             if {[string match -nocase [molinfo $molid get {"color $r"}] $_modcat]} {
-                mol scaleminmax $molid $r 0 1023
+                mol scaleminmax $molid $r 0 10.23
             }
         }
     }    
@@ -233,7 +245,6 @@ proc color_all {{method "beta"}} {
     foreach molid [molinfo list] {
         for {set i 0} {$i < [molinfo $molid get numreps]} {incr i} {
             mol modcolor $i $molid $method
-            mol scaleminmax $molid $i 0 1023
         }
     }
 }
@@ -294,6 +305,7 @@ proc snapshot_display_state {} {
         foreach molid [molinfo list] {
             molinfo $molid set displayed $disp_snapshot($molid)
         }
+    B
     }
 }
 
@@ -308,7 +320,8 @@ proc kinase_reps {{forceprot ""} {mol_list ""}} {
     foreach molid $mol_list {
         set molname [exec basename [molinfo $molid get name]]
         if {$forceprot eq ""} {
-            set prot [string range $molname 0 [expr {[string first "_" $molname] - 1}]]
+#            set prot [string range $molname 0 [expr {[string first "_" $molname] - 1}]]
+            set prot $molname
         } else {
             set prot $forceprot
         }
@@ -375,7 +388,13 @@ proc kinase_reps {{forceprot ""} {mol_list ""}} {
                 #NMR specific
                 mol selection "(sidechain or name CA) and resid 311 281 383 260"
                 mol addrep $molid
+
+                mol selection "(sidechain or name CA) and resid 422 424 426 435 472"
+                mol addrep $molid
                 
+                mol selection "(sidechain or name CA) and resid 406 407 408 410 297 301 302 306 307 313"
+                mol addrep $molid
+
                 set alignsel [atomselect $molid "backbone and resid 337 to 343"]
             }
             "EGFR*" {
@@ -407,6 +426,44 @@ proc kinase_reps {{forceprot ""} {mol_list ""}} {
                 mol addrep $molid
                 
                 set alignsel [atomselect $molid "backbone and resid 789 to 795"]
+            }
+            "*model*" {
+                # src-255
+                mol representation Licorice
+                mol color Type
+                #Tyr stuff
+                # Tyr HRD-Arg DFG..Arg aCbotGlu (no-equiv, maybe bb?)
+                mol selection "(sidechain or name CA) and resid 161 154 130"
+                mol addrep $molid
+                #DFG stuff
+                # Lys Glu D F
+                mol selection "(sidechain or name CA) and resid 40 55 149 150"
+                mol addrep $molid
+                
+                mol color Name
+                #Spine stuff
+                # aC b4 Gatekeeper HRD-His
+                mol selection "(sidechain or name CA) and resid 59 70 83 129"
+                mol addrep $molid
+                #P-loop to aC mutant
+                # b1 b2 pre-aCloop 
+                mol selection "(sidechain or name CA) and resid 17 25 43"
+                mol addrep $molid
+                #random ABL mutants + equiv (mostly from kalodimos Abl NMR paper)
+                mol selection "(sidechain or name CA) and resid 20 23 127 157"
+                mol addrep $molid
+                #hinge
+                mol selection "(backbone or name HN) and resid 84 85 86"
+                mol addrep $molid
+                
+                #NMR specific
+                mol selection "(sidechain or name CA) and resid 56 26 128 5"
+                mol addrep $molid
+                
+                mol selection "(sidechain or name CA) and resid 167 169 171 180 217"
+                mol addrep $molid
+                
+                set alignsel [atomselect $molid "backbone and resid 82 to 88"]
             }
             default {
             }
@@ -451,6 +508,60 @@ proc set_hinge_flag {{forceprot ""} {mol_list ""}} {
     }
 }
 
+proc setup_kchannel {{forceprot ""} {mol_list ""}} {
+    # sets up alignment of SHKR/KV1.2 by conserved acceptors
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    foreach molid $mol_list {
+        set molname [exec basename [molinfo $molid get name]]
+        if {$forceprot ne ""} {
+            set molname $forceprot
+        }
+        switch -glob [string tolower $molname] {
+            "shkr*" {
+                set alignsel [atomselect $molid "chain A and backbone and resid 218 221 247 283 293 316"]
+                set vsd_acceptors "(name CA or sidechain) and resid 218 221 247 283 293 316"
+                set vsd_donors    "(name CA or sidechain) and resid 362 365 368 371 374 377 378 380"
+                set vsd_plug      "(name CA or sidechain) and resid 290"
+            }
+            "7uk*" {
+                set alignsel [atomselect $molid "chain A and backbone and resid 176 179 205 233 243 266"]
+                set vsd_acceptors "(name CA or sidechain) and resid 176 179 205 233 243 266"
+                set vsd_donors    "(name CA or sidechain) and resid 293 296 299 302 305 306"
+                set vsd_plug      "(name CA or sidechain) and resid 240"
+            }
+            "6p6*" {
+                set alignsel [atomselect $molid "chain A and backbone and resid 1007 1010 1032 1049 1059 1080"]
+                set vsd_acceptors "(name CA or sidechain) and resid 1032 1059 1080"
+                set vsd_donors    "(name CA or sidechain) and resid 1099 1102 1105 1108"
+                set vsd_plug      "(name CA or sidechain) and resid 1056"
+            }
+            "*model*" {
+                set alignsel [atomselect $molid "chain A and backbone and resid 13 16 42 78 88 111"]
+                set vsd_acceptors "(name CA or sidechain) and resid 13 16 42 78 88 111"
+                set vsd_donors    "(name CA or sidechain) and resid 157 160 163 166 169 172 173 175"
+                set vsd_plug      "(name CA or sidechain) and resid 85"
+            }
+            default {
+            }
+        }
+        if {[info exists alignsel]} {
+            $alignsel set flag0 1
+            $alignsel delete
+            
+            mol representation Licorice
+            mol color Type
+            mol selection $vsd_acceptors
+            mol addrep $molid
+            mol selection $vsd_donors
+            mol addrep $molid
+            mol selection $vsd_plug
+            mol addrep $molid
+        }
+    }
+}
+
 proc populate_rmsdtt_seltext {prot} {
     # prepares hard-coded presets for RMSDTT align selection
     menu rmsdtt on
@@ -460,11 +571,16 @@ proc populate_rmsdtt_seltext {prot} {
     switch $prot {
         "SRC" {
             set line_list {
-                           "resid 267 to 298 324 to 339 # nlobe"
-                           "#resid 359 to 379 440 to 457 489 to 517 # clobe"
+                           "#resid 267 to 298 324 to 339 # nlobe"
+                           "resid 359 to 379 440 to 457 489 to 517 # clobe"
                            "#resid 303 to 317 # aC-helix"
                            "#flag0 1"
                            "#resid 400 to 404 425 to 437 # bef/aft A-loop"
+                          }
+        }
+        "test" {
+            set line_list {
+                          "chain A and residue > 180 and name CA"
                           }
         }
         default {
@@ -593,6 +709,33 @@ proc toggle_H {{mode ""}} {
                 "none" {
                     set new_sel "($clean_sel) and not hydrogen"
                 }
+            }
+            mol modselect $rep $molid $new_sel
+        }
+    }
+}
+
+proc only_chain {{chainsel "all"}} {
+    # show only selected chain, or all
+    # greedily matches `and chain .*$`
+    # ()'s current selection
+    #   won't remove brackets if manual edit causes them to not be first/last
+
+    foreach molid [molinfo list] {
+        set numreps [molinfo $molid get numreps]
+        for {set rep 0} {$rep < $numreps} {incr rep} {
+            set current_sel [molinfo $molid get [subst {{selection $rep}}]]
+            set current_sel [string trim $current_sel "{}"]
+            # \S is non-whitespace character
+            regsub { and chain \S+$} $current_sel "" clean_sel
+            if {[string first "(" $clean_sel] == 0 && [string last ")" $clean_sel] == [expr {[string length $clean_sel] - 1}]} {
+                set clean_sel [string range $clean_sel 1 end-1]
+            }
+            
+            if {$chainsel eq "all"} {
+                set new_sel "$clean_sel"
+            } else {
+                set new_sel "($clean_sel) and chain $chainsel"
             }
             mol modselect $rep $molid $new_sel
         }
@@ -840,12 +983,19 @@ proc mini_stamp_call {nseq {filePrefix "stamp"} {scan 1} {scanslide 5} {scanscor
     close $out_fh
 }
 
-proc label_charges {seltext} {
+proc label_atoms {{molid top} {seltext "all"} {property name} {label_size 2}} {
     # label each atom with partial charge
-    set label_sel [atomselect top $seltext]
+    graphics $molid delete all
+    set label_sel [atomselect $molid $seltext]
     foreach i [$label_sel get index] {
-        set atom_sel [atomselect top "index $i"]
-        draw text [join [$atom_sel get {x y z}]] "[format "%0.3f" [$atom_sel get charge]]" size 2
+        set atom_sel [atomselect $molid "index $i"]
+        set label_val [$atom_sel get $property]
+        if {[string is double -strict $label_val]} {
+            set label_text [format "%0.3f" $label_val]
+        } else {
+            set label_text $label_val
+        }
+        graphics $molid text [join [$atom_sel get {x y z}]] $label_text size $label_size
         $atom_sel delete
     }
     $label_sel delete
@@ -856,6 +1006,14 @@ proc ssrecalc_molid { molid args } {
     # trace passes 3 additional arguments and does nothing if they're not accepted?
     # e.g. `trace add variable vmd_frame(4) write` passes args: vmd_frame 4 write
     mol ssrecalc $molid
+}
+
+proc bondsrecalc_molid { molid args } {
+    # trace function to ssrecalc every frame
+    # trace passes 3 additional arguments and does nothing if they're not accepted?
+    # e.g. `trace add variable vmd_frame(4) write` passes args: vmd_frame 4 write
+    mol bondsrecalc $molid
+    mol reanalyze $molid
 }
 
 proc interactive {{on 1} {mol_list ""}} {
@@ -881,6 +1039,20 @@ proc interactive_top {} {
     global vmd_frame
     set molid [molinfo top]
     set tracecmd "ssrecalc_molid $molid"
+    set tracevar "vmd_frame($molid)"
+    if {[lsearch [trace info variable $tracevar] "write {$tracecmd}"] == -1} {
+        trace add variable $tracevar write $tracecmd
+    } else {
+        trace remove variable $tracevar write $tracecmd
+    }
+}
+
+proc interactive_bonds {{molid "top"}} {
+    global vmd_frame
+    if {$molid == "top"} {
+        set molid [molinfo top]
+    }
+    set tracecmd "bondsrecalc_molid $molid"
     set tracevar "vmd_frame($molid)"
     if {[lsearch [trace info variable $tracevar] "write {$tracecmd}"] == -1} {
         trace add variable $tracevar write $tracecmd
@@ -968,17 +1140,6 @@ proc myrender {{show 0} {ask 1} {suffix {}}} {
     #display resize $x $y
     #scale by 0.5
 }
-
-proc label_atoms { molid seltext } { 
-    # assign vmd atom labels to selection
-    set sel [atomselect $molid $seltext] 
-    set atomlist [$sel list] 
-    foreach {atom} $atomlist {
-        set atomlabel [format "%d/%d" $molid $atom] 
-        label add Atoms $atomlabel 
-    } 
-    $sel delete 
-} 
 
 proc save_view_to_file {{fname "view.dat"}} {
     # save camera to file
@@ -1196,9 +1357,6 @@ proc trace_default_rep {} {
 
 # automatically applies this block after initialized
 after idle {
-    foreach molid [molinfo list] {
-        default_rep $molid
-    } 
     after idle {
         custom_setup
     }
