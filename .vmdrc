@@ -12,6 +12,13 @@
 #   should be:
 #   set hcoor [vecinvert [vecnorm $hvec]]
 # 
+# All atomselect created permanently reserve memory
+#   even if spawned in 1-liner
+#   `$atomselect delete` only frees memory for more atomselects
+#       best to delete asap as you go
+#   500000 atomselects == 16GB ram, size of selection doesn't matter
+#       $atomselect frame $i changes frame without creating new selection
+#
 # TCL WILL ERROR ON UNMATCHED { IN COMMENTS THAT ARE IN FUNCTIONS
 #   Only on { brackets, and only in functions, also in text blocks?
 #   this is important for linguistic flexibility...
@@ -67,20 +74,24 @@ render options Tachyon {"/usr/local/lib/vmd/tachyon_LINUXAMD64" -aasamples 12 -t
 proc default_rep {molid} {
 # for freshly initialized mols
     mol delrep 0 $molid
-    if {[[atomselect $molid "protein"] num] > 0} {
+    set prot_sel [atomselect $molid "protein"]
+    if {[$prot_sel num] > 0} {
         mol selection "all"
         mol representation "NewCartoon"
         mol color "Name"
         mol material "AOChalky"
         mol addrep $molid
     }
-    if {[[atomselect $molid "all"] num] < 500} {
+    set all_sel [atomselect $molid "all"]
+    if {[$all_sel num] < 500} {
         mol selection "all"
         mol representation "Licorice"
         mol color "Type"
         mol material "Glossy"
         mol addrep $molid
     }
+    $prot_sel delete
+    $all_sel delete
 #    mol selection "resid 440 to 446"
 #    mol representation "Licorice"
 #    mol addrep $molid
@@ -114,12 +125,19 @@ proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"} {contacts_
     # measure contacts does not consider pbc
     pbc join fragment
     pbc wrap
-    lassign [measure contacts $cutoff [atomselect top $contacts_sel1] [atomselect top $contacts_sel2]] clash_atoms1 clash_atoms2
+    set atomsel_contacts_sel1 [atomselect top $contacts_sel1]
+    set atomsel_contacts_sel2 [atomselect top $contacts_sel2]
+    lassign [measure contacts $cutoff $atomsel_contacts_sel1 atomsel_contacts_sel2] clash_atoms1 clash_atoms2
 
-    [atomselect top "all"] moveby $halfvec
+    set all [atomselect top "all"]
+    $all moveby $halfvec
     pbc wrap
-    lassign [measure contacts $cutoff [atomselect top $contacts_sel1] [atomselect top $contacts_sel2]] new_clash_atoms1 new_clash_atoms2
-    [atomselect top "all"] moveby [vecinvert $halfvec]
+    lassign [measure contacts $cutoff $atomsel_contacts_sel1 $atomsel_contacts_sel2] new_clash_atoms1 new_clash_atoms2
+    $all moveby [vecinvert $halfvec]
+
+    $atomsel_contacts_sel1 delete
+    $atomsel_contacts_sel2 delete
+    $all delete
 
     set clash_atoms1 [concat $clash_atoms1 $new_clash_atoms1]
     set clash_atoms2 [concat $clash_atoms2 $new_clash_atoms2]
@@ -138,6 +156,7 @@ proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"} {contacts_
     set top_numbonds [$compare_sel get numbonds]
     mol bondsrecalc top
     set vmd_numbonds [$compare_sel get numbonds]
+    $compare_sel delete
     set odd_bonds {}
     for {set i 0} {$i < [llength $top_numbonds]} {incr i} {
         if {[lindex $vmd_numbonds $i] != [lindex $top_numbonds $i]} {
@@ -509,7 +528,6 @@ proc set_hinge_flag {{forceprot ""} {mol_list ""}} {
 }
 
 proc setup_kchannel {{forceprot ""} {mol_list ""}} {
-    # sets up alignment of SHKR/KV1.2 by conserved acceptors
     if {$mol_list eq ""} {
         set mol_list [molinfo list]
     }
@@ -537,11 +555,11 @@ proc setup_kchannel {{forceprot ""} {mol_list ""}} {
                 set vsd_donors    "(name CA or sidechain) and resid 1099 1102 1105 1108"
                 set vsd_plug      "(name CA or sidechain) and resid 1056"
             }
-            "*model*" {
-                set alignsel [atomselect $molid "chain A and backbone and resid 13 16 42 78 88 111"]
-                set vsd_acceptors "(name CA or sidechain) and resid 13 16 42 78 88 111"
-                set vsd_donors    "(name CA or sidechain) and resid 157 160 163 166 169 172 173 175"
-                set vsd_plug      "(name CA or sidechain) and resid 85"
+            "herg*" {
+                set alignsel [atomselect $molid "chain A and backbone and resid 456 466 501"]
+                set vsd_acceptors "(name CA or sidechain) and resid 411 456 460 466 501 509"
+                set vsd_donors    "(name CA or sidechain) and resid 525 528 531 534 537 538 540 541"
+                set vsd_plug      "(name CA or sidechain) and resid 463"
             }
             default {
             }
@@ -608,7 +626,9 @@ proc wrap_resname {{wrap_resname} {mol_list ""}} {
         set prot_sel [atomselect $molid "same fragment as protein"]
         set prot_com [measure center $prot_sel]
         set prot_sel_residue [lsort -unique [$prot_sel get residue]]
-        set prot_sel_rescom [measure centerperresidue $prot_sel] #new in vmd 1.94
+        #new in vmd 1.94
+        set prot_sel_rescom [measure centerperresidue $prot_sel]
+        $prot_sel delete
         
         min_rescom_dist = 9999
         for {set i 0} {$i < [llength $prot_sel_residue]} {incr i} {
@@ -618,7 +638,9 @@ proc wrap_resname {{wrap_resname} {mol_list ""}} {
                 set min_rescom_residue [lindex $prot_sel_residue $i]
             }
         }
-        set center_atom [lindex [[atomselect $molid "residue $min_rescom_residue"] get index] 0]
+        sel center_sel [atomselect $molid "residue $min_rescom_residue"]
+        set center_atom [lindex [$center_sel get index] 0]
+        $center_sel delete
         pbc wrap -molid $molid -all -sel "resname $wrap_resname" -compound fragment -center bb -centersel "index $center_atom"
     }
 }
@@ -637,7 +659,9 @@ proc disp_uncommon {{uncommon_resnames {}}} {
     # ???could automate water detection
     set common_resnames {"ALA" "ARG" "ASN" "ASP" "CYS" "GLN" "GLU" "GLY" "HIS" "HID" "HSD" "HIE" "HSE" "HIP" "HSP" "ILE" "LEU" "LYS" "MET" "PHE" "PRO" "SER" "THR" "TRP" "TYR" "VAL" "TIP3" "HOH" "WAT" "SPC" "SOL" "CLA" "CL" "POT" "NA" "SOD"}
     foreach molid [molinfo list] {
-        set all_resnames [lsort -unique [[atomselect $molid "all"] get resname]]
+        set all [atomselect $molid "all"]
+        set all_resnames [lsort -unique [$all get resname]]
+        $all delete
         set molid_uncommon_resnames $uncommon_resnames
         foreach resname $all_resnames {
             if {($resname ni $common_resnames)} {
@@ -776,8 +800,11 @@ proc align {{select_str "name CA"}} {
             $sel frame $i
             $all move [measure fit $sel $ref]
         }
+        $all delete
+        $sel delete
         display resetview
     }
+    $ref delete
 }
 
 proc nice_align {{select_str "name CA"} {frame 0}} {
@@ -804,6 +831,9 @@ proc align_self {{select_str "name CA"} {frame 0}} {
             $tgt frame $i
             $all move [measure fit $tgt $ref]
         }
+        $ref delete
+        $all delete
+        $tgt delete
     }
     display resetview
 }
@@ -981,6 +1011,119 @@ proc mini_stamp_call {nseq {filePrefix "stamp"} {scan 1} {scanslide 5} {scanscor
         }
     }
     close $out_fh
+}
+
+proc calc_chain_order {molid} {
+    # calculates clockwise order of chains in x-y plane
+    # positions are relative to vector from nter of chain 0 to chain 1
+    # should scale to any number of chains, only tested tetramer
+    set prot_sel [atomselect $molid "protein"]
+    set chains [lsort -unique [$prot_sel get chain]]
+    $prot_sel delete
+
+    set idx_zval_pairs {}
+    for {set i 0} {$i < [llength $chains]} {incr i} {
+        set chain [lindex $chains $i]
+        set chain_sel [atomselect $molid "protein and chain $chain"]
+        set nter_idx [lindex [$chain_sel get index] 0]
+        $chain_sel delete
+
+        set nter_sel [atomselect $molid "index $nter_idx"]
+        set nter_pos [lindex [$nter_sel get {x y z}] 0]
+        $nter_sel delete
+        
+        if {$i == 0} {
+            set ref_nter_pos $nter_pos
+            continue
+        }
+
+        set vec [vecsub $nter_pos $ref_nter_pos]
+        set mag [veclength $vec]
+        
+        if {$i == 1} {
+            set ref_vec $vec
+            set ref_mag [veclength $ref_vec]
+        }
+        set cross [veccross $ref_vec $vec]
+        set cross_mag [veclength [veccross $ref_vec $vec]]
+        set sintheta [expr "$cross_mag/($ref_mag*$mag)"]
+        if {[lindex $cross 2] < 0} { 
+            # could do scalar triple to a selected vector here instead of assuming system aligned in +Z
+            set sintheta [expr {$sintheta*-1}]
+        }
+        lappend idx_theta_pairs "$i $sintheta"
+    }
+    set chain_order [concat 0 [lmap pair [lsort -index 1 -real $idx_theta_pairs] {lindex $pair 0}]]
+    return $chain_order
+}
+    
+
+proc align_mixed_chain_orders {{seltext "all"} {ref_molid "top"} {tgt_molids "all"} {ref_chain "A"} {ref_frame 0}} {
+# aligns and then renames chains based on geometric order around Z-axis in $ref_molid but cannot change index/residue order from initial load
+# $seltext must result in same orientation when aligning to $ref_chain
+    if {$ref_molid == "top"} {
+        set ref_molid [molinfo top]
+    }
+    if {$tgt_molids == "all"} {
+        set tgt_molids [molinfo list]
+        set tgt_molids [lsearch -all -inline -not $tgt_molids $ref_molid]
+    }
+    set ref [atomselect $ref_molid "$seltext" frame $ref_frame]
+    set ref_chains [lsort -unique [$ref get chain]]
+    set initial_ref [atomselect $ref_molid "$seltext and chain $ref_chain" frame $ref_frame]
+    set ref_chain_order [calc_chain_order $ref_molid]
+
+    foreach molid $tgt_molids {
+        set all [atomselect $molid "all"]
+        set tgt [atomselect $molid "$seltext"]
+        set tgt_chains [lsort -unique [$tgt get chain]]
+        if {[llength $ref_chains] != [llength $tgt_chains]} {
+            error "molid $molid, ref chains {$ref_chains} does not match target chains {$tgt_chains} in selection"
+        }
+        set initial_tgt [atomselect $molid "$seltext and chain $ref_chain"]
+        $all move [measure fit $initial_tgt $initial_ref]
+        $initial_tgt delete
+        set tgt_chain_order [calc_chain_order $molid]
+
+        set tgt_idx {}
+        set chain_sels {}
+        for { set c 0 } { $c < [llength $tgt_chain_order] } { incr c } {
+            set ref_chain [lindex $ref_chains $c]
+            set tgt_chain [lindex $tgt_chains [lindex $tgt_chain_order [lsearch $ref_chain_order $c]]]
+
+            set ref_chain_sel [atomselect $ref_molid "$seltext and chain $ref_chain"]
+            set tgt_chain_sel [atomselect $molid "$seltext and chain $tgt_chain"]
+            set tgt_chain_all [atomselect $molid "all and chain $tgt_chain"]
+            lappend chain_sels $tgt_chain_all
+
+            if {[$ref_chain_sel num] != [$tgt_chain_sel num]} {
+                error "mismatched indices aligning ref chain $ref_chain ([$ref_chain_sel num] atoms) to tgt chain $tgt_chain ([$tgt_chain_sel num] atoms)"
+            }
+            set tgt_idx [concat $tgt_idx [$tgt_chain_sel get index]]
+            $ref_chain_sel delete
+            $tgt_chain_sel delete
+        }
+        set tgt_idx_order [lsort -indices -integer $tgt_idx]
+        set nf [molinfo $molid get numframes]
+        for { set f 0 } { $f < $nf } { incr f } {
+            $all frame $f
+            $tgt frame $f
+            $all move [measure fit $tgt $ref order $tgt_idx_order]
+        }
+        $all delete
+        $tgt delete
+        
+        # rename target chains in ref_chain_order
+        for { set c 0 } { $c < [llength $tgt_chain_order] } { incr c } {
+            set ref_chain [lindex $ref_chains $c]
+            set tgt_chain [lindex $tgt_chains [lindex $tgt_chain_order [lsearch $ref_chain_order $c]]]
+            [lindex $chain_sels $c] set chain $ref_chain
+            [lindex $chain_sels $c] delete
+        }
+    }
+    $ref delete
+    $initial_ref delete
+    display resetview
 }
 
 proc label_atoms {{molid top} {seltext "all"} {property name} {label_size 2}} {
@@ -1193,6 +1336,7 @@ proc load_view_from_file {{fname "view.dat"}} {
 #      animate goto $i
 #      $MDM2_selection frame $i
 #      $MDM2_selection set structure $MDM2_crystal_ss
+#      $MDM2_selection delete
 #      display update
 #      set filename $name.[format "%05d" [expr $i/$freq]].dat
 #      render Tachyon $filename "gzip -f $filename"
