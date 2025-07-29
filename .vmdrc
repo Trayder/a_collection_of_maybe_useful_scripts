@@ -2,6 +2,7 @@
 #   VMD reads 1st letter of psf segid as chain (PROT/POT are both P)
 # ╭──────SeqData preferentially uses chain over segID
 # │         Modified SeqData to preserve segid, what will this break?
+# │             Currently prioritizing blank segid over chain
 # │  ╭──Seqdata 3-1 letter dictionary includes ions (POT/LYS both K)
 # │  │  
 # │  │  edit /usr/local/lib/vmd/plugins/noarch/tcl/seqdata1.1/seqdata_vmd.tcl
@@ -30,7 +31,7 @@ proc custom_setup {} {
     foreach molid [molinfo list] {
         default_rep $molid
     } 
-    trace_default_rep
+#    trace_default_rep
 #    kinase_reps SRC
 #    toggle_H "none"
 #    color_all chain
@@ -446,44 +447,6 @@ proc kinase_reps {{forceprot ""} {mol_list ""}} {
                 
                 set alignsel [atomselect $molid "backbone and resid 789 to 795"]
             }
-            "*model*" {
-                # src-255
-                mol representation Licorice
-                mol color Type
-                #Tyr stuff
-                # Tyr HRD-Arg DFG..Arg aCbotGlu (no-equiv, maybe bb?)
-                mol selection "(sidechain or name CA) and resid 161 154 130"
-                mol addrep $molid
-                #DFG stuff
-                # Lys Glu D F
-                mol selection "(sidechain or name CA) and resid 40 55 149 150"
-                mol addrep $molid
-                
-                mol color Name
-                #Spine stuff
-                # aC b4 Gatekeeper HRD-His
-                mol selection "(sidechain or name CA) and resid 59 70 83 129"
-                mol addrep $molid
-                #P-loop to aC mutant
-                # b1 b2 pre-aCloop 
-                mol selection "(sidechain or name CA) and resid 17 25 43"
-                mol addrep $molid
-                #random ABL mutants + equiv (mostly from kalodimos Abl NMR paper)
-                mol selection "(sidechain or name CA) and resid 20 23 127 157"
-                mol addrep $molid
-                #hinge
-                mol selection "(backbone or name HN) and resid 84 85 86"
-                mol addrep $molid
-                
-                #NMR specific
-                mol selection "(sidechain or name CA) and resid 56 26 128 5"
-                mol addrep $molid
-                
-                mol selection "(sidechain or name CA) and resid 167 169 171 180 217"
-                mol addrep $molid
-                
-                set alignsel [atomselect $molid "backbone and resid 82 to 88"]
-            }
             default {
             }
         }
@@ -560,6 +523,8 @@ proc setup_kchannel {{forceprot ""} {mol_list ""}} {
                 set vsd_acceptors "(name CA or sidechain) and resid 411 456 460 466 501 509"
                 set vsd_donors    "(name CA or sidechain) and resid 525 528 531 534 537 538 540 541"
                 set vsd_plug      "(name CA or sidechain) and resid 463"
+                set linker_pocket "(name CA or sidechain) and resid 540 544 665"
+                set extrares      "(name CA or sidechain) and resid 674 681 685 694 699"
             }
             default {
             }
@@ -576,6 +541,14 @@ proc setup_kchannel {{forceprot ""} {mol_list ""}} {
             mol addrep $molid
             mol selection $vsd_plug
             mol addrep $molid
+            if {[info exists linker_pocket]} {
+                mol selection $linker_pocket
+                mol addrep $molid
+            }
+            if {[info exists extrares]} {
+                mol selection $extrares
+                mol addrep $molid
+            }
         }
     }
 }
@@ -1013,22 +986,26 @@ proc mini_stamp_call {nseq {filePrefix "stamp"} {scan 1} {scanslide 5} {scanscor
     close $out_fh
 }
 
-proc calc_chain_order {molid} {
+proc calc_chain_order {{molid top} {frame now}} {
     # calculates clockwise order of chains in x-y plane
+    # a tumbling protein can have different chain orders at different frames
     # positions are relative to vector from nter of chain 0 to chain 1
     # should scale to any number of chains, only tested tetramer
-    set prot_sel [atomselect $molid "protein"]
+    if {$molid == "top"} {
+        set molid [molinfo top]
+    }
+    set prot_sel [atomselect $molid "protein" frame $frame]
     set chains [lsort -unique [$prot_sel get chain]]
     $prot_sel delete
 
     set idx_zval_pairs {}
     for {set i 0} {$i < [llength $chains]} {incr i} {
         set chain [lindex $chains $i]
-        set chain_sel [atomselect $molid "protein and chain $chain"]
+        set chain_sel [atomselect $molid "protein and chain $chain" frame $frame]
         set nter_idx [lindex [$chain_sel get index] 0]
         $chain_sel delete
 
-        set nter_sel [atomselect $molid "index $nter_idx"]
+        set nter_sel [atomselect $molid "index $nter_idx" frame $frame]
         set nter_pos [lindex [$nter_sel get {x y z}] 0]
         $nter_sel delete
         
@@ -1066,12 +1043,12 @@ proc align_mixed_chain_orders {{seltext "all"} {ref_molid "top"} {tgt_molids "al
     }
     if {$tgt_molids == "all"} {
         set tgt_molids [molinfo list]
-        set tgt_molids [lsearch -all -inline -not $tgt_molids $ref_molid]
+        #set tgt_molids [lsearch -all -inline -not $tgt_molids $ref_molid]
     }
     set ref [atomselect $ref_molid "$seltext" frame $ref_frame]
     set ref_chains [lsort -unique [$ref get chain]]
     set initial_ref [atomselect $ref_molid "$seltext and chain $ref_chain" frame $ref_frame]
-    set ref_chain_order [calc_chain_order $ref_molid]
+    set ref_chain_order [calc_chain_order $ref_molid $ref_frame]
 
     foreach molid $tgt_molids {
         set all [atomselect $molid "all"]
@@ -1428,12 +1405,12 @@ proc back {} {
 	}	
 }
 
-proc lmap {_var list body} {
-    upvar 1 $_var var
-    set res {}
-    foreach var $list {lappend res [uplevel 1 $body]}
-    set res
-}
+#proc lmap {_var list body} {
+#    upvar 1 $_var var
+#    set res {}
+#    foreach var $list {lappend res [uplevel 1 $body]}
+#    set res
+#}
 
 proc highlight_beta { args } {
   global highlight_repname
