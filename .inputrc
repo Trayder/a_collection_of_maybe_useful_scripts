@@ -1,0 +1,2 @@
+"\e[1;5C": shell-forward-word
+"\e[1;5D": shell-backward-word

@@ -98,12 +98,69 @@ proc default_rep {molid} {
 #    mol addrep $molid
 }
 
+proc temp_estimate {{seltext "all"} {dof ""}} {
+    # estimates temperature of selection from velocities for mol top frame now
+    # velocities from {vx vy vz}, can load namd.vel file as NAMD bincoor into {x y z} then "$atomsel set {vx vy vz} [$atomsel get {x y z}]"
+    # DoF is complicated by shake, rigid bonds etc.
+    #   can get whole system DoF from NAMD log but appears to not include -3 from rot+trans
+    
+    # J.K-1
+    set kb 1.380649e-23
+    # internal units to A/ps to m/s
+    set namdvelconv [expr 20.45482706*100]
+    # amu to kg
+    set massconv 1.66e-27
+    set kin 0
+
+    set sel [atomselect top $seltext]
+    if {$dof eq ""} {
+        # for rigidbonds all, matches NAMD log
+        set dof [expr (3*[[atomselect top "($seltext) and not water and not hydrogen"] num]) + (2*[[atomselect top "($seltext) and not water and hydrogen"] num]) + (2*[[atomselect top "($seltext) and water"] num])]
+    }
+    set massvec [vecscale $massconv [$sel get mass]]
+    set velxyz [$sel get {vx vy vz}]
+    set v2vec [list ]
+    foreach vec $velxyz {
+        lappend v2vec [expr ([veclength $vec]*$namdvelconv)**2]
+    }
+    set mv2vec [vecmul $v2vec $massvec]
+    foreach mv2 $mv2vec {
+        set kin [expr $kin + (0.5*$mv2)]
+    }
+    set temp [expr (2*$kin) / ($dof * $kb)]
+    puts $temp
+}
+
+proc writepsf_sel {{molid top} {sel_text "all"} {outfile "./temp.psf"}} {
+    if {$molid == "top"} {
+        set molid [molinfo top]
+    }
+    set sel [atomselect $molid $sel_text]
+    # guesses for all based on coordinates
+    topo guessbonds
+    $sel writepsf $outfile
+    $sel delete
+}
+
+
 proc clonereps {{source_molid top} {target_molids ""}} {
     # todo
     # should hook into plugin instead of recoding
     #for {set i 0} {$i < [molinfo $molid get numreps]} {incr i} {
     #    mol modcolor $i $molid $method
     #}     
+}
+
+proc renum_res {{offset 0} {sel all} {mol_list ""}} {
+    if {$mol_list eq ""} {
+        set mol_list [molinfo list]
+    }
+    foreach molid $mol_list {
+        set sel [atomselect $molid $sel]
+        set oldresid [$sel get resid]
+        $sel set resid [lmap x $oldresid {expr $x+$offset}]
+        $sel delete
+    }
 }
 
 proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"} {contacts_sel1 "all"} {contacts_sel2 "all"}} {
@@ -128,13 +185,14 @@ proc clash_detect {{cutoff 1} {check_bonds_sel "not (water or ions)"} {contacts_
     pbc wrap
     set atomsel_contacts_sel1 [atomselect top $contacts_sel1]
     set atomsel_contacts_sel2 [atomselect top $contacts_sel2]
-    lassign [measure contacts $cutoff $atomsel_contacts_sel1 atomsel_contacts_sel2] clash_atoms1 clash_atoms2
+    lassign [measure contacts $cutoff $atomsel_contacts_sel1 $atomsel_contacts_sel2] clash_atoms1 clash_atoms2
 
     set all [atomselect top "all"]
     $all moveby $halfvec
     pbc wrap
     lassign [measure contacts $cutoff $atomsel_contacts_sel1 $atomsel_contacts_sel2] new_clash_atoms1 new_clash_atoms2
     $all moveby [vecinvert $halfvec]
+    pbc wrap
 
     $atomsel_contacts_sel1 delete
     $atomsel_contacts_sel2 delete
@@ -286,6 +344,47 @@ proc custom_scale {} {
     display update on
 }
 
+proc color_scale_plddt {} {
+    display update off
+    set color_start [colorinfo num]
+    set r_seg [list {0 628 1 1} {628 728 1 0} {728 1024 0 0}]
+    set g_seg [list {0 528 0 0} {528 628 0 1} {628 831 1 1} {831 920 1 0.092711} {920 1024 0.092711 0.092711}]
+    set b_seg [list {0 513 .16 .16} {513 528 .16 0} {528 731 0 0} {731 831 0 1} {831 1024 1 1}]
+    
+    proc seg_val {segments i} {
+        foreach seg $segments {
+            lassign $seg start end c0 c1
+            if {$i >= $start && $i < $end} {
+                set c [expr {$c0 + ($i - $start)/double($end - $start) * ($c1-$c0)}]
+                return $c
+            }
+        }
+    }
+    
+    for {set i 0} {$i < 1024} {incr i} {
+        set r [seg_val $r_seg $i]
+        set g [seg_val $g_seg $i]
+        set b [seg_val $b_seg $i]
+        color change rgb [expr $i + $color_start] $r $g $b
+    }
+    mol scaleminmax 0 0 0 100
+    display update on
+}
+
+proc smooth_beta_values {} {
+    set all_ca [atomselect top "name CA"]
+    set last_beta [lindex [$all_ca get beta] 0]
+    foreach i [$all_ca get index] {
+        set this_atom [atomselect top "index $i"]
+        set this_beta [$this_atom get beta]
+        $this_atom set beta [format %.2f [expr ($this_beta+$last_beta)/2]]
+        set last_beta $this_beta
+        $this_atom delete
+    }
+    $all_ca delete
+}
+
+
 proc cycle_mol_display {num} {
     # displays only the next $num mols after the last displayed mol or 0
     set cycle_start 0
@@ -303,9 +402,9 @@ proc cycle_mol_display {num} {
 }
 
 proc snapshot_display_state {} {
-    # toggle between looking at 1 structure, and many structures
     # if >=2 mols displayed: take snapshot of displayed mols and mol off all
     # else: restore last snapshot
+    # useful to toggle between looking at 1 and many structures: snapshot_display_state; mol on 0
     global disp_snapshot
 
     array set disp_state {}
@@ -325,7 +424,6 @@ proc snapshot_display_state {} {
         foreach molid [molinfo list] {
             molinfo $molid set displayed $disp_snapshot($molid)
         }
-    B
     }
 }
 
@@ -447,6 +545,31 @@ proc kinase_reps {{forceprot ""} {mol_list ""}} {
                 
                 set alignsel [atomselect $molid "backbone and resid 789 to 795"]
             }
+            "FLT3*" {
+                mol representation Licorice
+                mol color Type
+                # A-loop: Tyr HRD-Arg DFG..Arg
+                mol selection "(sidechain or name CA) and resid 842 810 834"
+                mol addrep $molid
+                # Active site: Lys Glu D F
+                mol selection "(sidechain or name CA) and resid 644 661 829 830"
+                mol addrep $molid
+                mol color Name
+                # Spine: aC b4 Gatekeeper HRD-His
+                mol selection "(sidechain or name CA) and resid 665 678 691 809"
+                mol addrep $molid
+                # P-loop: Phe
+                mol selection "(sidechain or name CA) and resid 621"
+                mol addrep $molid
+                # hinge
+                mol selection "(backbone or name HN) and resid 692 693 694"
+                mol addrep $molid
+                # FLT3 N-term JM stuff: aC-Trp BindingSite-Tyr Charged A-loop-Tyr mimics 
+                mol selection "(sidechain or name CA) and resid 603 572 573 593 595 654 651 589 591"
+                mol addrep $molid
+                
+                set alignsel [atomselect $molid "backbone and resid 690 to 696"]
+            }
             default {
             }
         }
@@ -524,7 +647,7 @@ proc setup_kchannel {{forceprot ""} {mol_list ""}} {
                 set vsd_donors    "(name CA or sidechain) and resid 525 528 531 534 537 538 540 541"
                 set vsd_plug      "(name CA or sidechain) and resid 463"
                 set linker_pocket "(name CA or sidechain) and resid 540 544 665"
-                set extrares      "(name CA or sidechain) and resid 674 681 685 694 699"
+                set extrares      "(name CA or sidechain) and resid 674 681 685 694 698 699"
             }
             default {
             }
@@ -637,10 +760,15 @@ proc disp_uncommon {{uncommon_resnames {}}} {
         $all delete
         set molid_uncommon_resnames $uncommon_resnames
         foreach resname $all_resnames {
-            if {($resname ni $common_resnames)} {
-                lappend molid_uncommon_resnames $resname
+            if {($resname ni $common_resnames)} {        
+                set uncsel [atomselect $molid "resname $resname"]
+                set uncres [lsort -unique [$uncsel get residue]]
+                $uncsel delete
+                if {[llength $uncres] < 10} {
+                    lappend molid_uncommon_resnames $resname
+                }
             }
-        }        
+        }
         if {[llength $molid_uncommon_resnames] > 0} {
             mol representation Licorice
             mol material Glossy
@@ -760,6 +888,31 @@ proc update_secondary_structure_assignment { args } {
         mol ssrecalc $molid
     }
 }
+
+proc draw_com {{molids "all"} {center "protein"} {dummy "index 0"}} {
+    # repurposes existing atom $dummy to represent COM of selection $center
+    if {$molids == "all"} {
+        set molids [molinfo list]
+    }
+    foreach molid $molids {
+        set nf [molinfo $molid get numframes]
+        set centersel [atomselect $molid $center]
+        set dummysel [atomselect $molid $dummy]
+        for { set i 0 } { $i < $nf } { incr i } {
+            $centersel frame $i
+            $dummysel frame $i
+            $dummysel moveto [measure center $centersel]
+        }
+        mol selection $dummy
+        mol representation "VDW"
+        mol color "Name"
+        mol material "AOChalky"
+        mol addrep $molid
+        $centersel delete
+        $dummysel delete
+    }
+}
+
 
 proc align {{select_str "name CA"}} {
     # aligns all mol to top/frame0 by atoms match in $select_str
@@ -1104,7 +1257,8 @@ proc align_mixed_chain_orders {{seltext "all"} {ref_molid "top"} {tgt_molids "al
 }
 
 proc label_atoms {{molid top} {seltext "all"} {property name} {label_size 2}} {
-    # label each atom with partial charge
+    # label selected atoms with property
+    # e.g. label_atoms 0 "segid LIG" charge 1
     graphics $molid delete all
     set label_sel [atomselect $molid $seltext]
     foreach i [$label_sel get index] {
@@ -1209,6 +1363,14 @@ proc top_most_frames {} {
     # only works inside function
     set molid_most_frames [lindex [lsort -integer -index 1 -decreasing [lmap i [molinfo list] {list $i [molinfo $i get numframes]}]] 0 0]
     if {$molid_most_frames ne ""} {mol top $molid_most_frames}
+}
+
+proc stl_view {} {
+    # setup for rendering surface as stl file with correct coordinates
+    set id_matrix {{1 0 0 0} {0 1 0 0} {0 0 1 0} {0 0 0 1}}
+    molinfo top set center_matrix [list $id_matrix]
+    molinfo top set rotate_matrix [list $id_matrix]
+    molinfo top set scale_matrix [list $id_matrix]
 }
 
 ##############################################
